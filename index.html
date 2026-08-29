@@ -990,7 +990,9 @@ function changeEvents() {
       out.push({ date: c.date, kind: "dose", label: s.name + " changed", detail: (was ? was + " → " : "") + (c.to || "") + (c.note ? " — " + c.note : ""), ref: s.id });
     });
   });
-  STATE.events.forEach(function (e) { out.push({ date: e.date, kind: e.cat || "other", label: e.label, detail: e.detail || "", ref: e.id }); });
+  /* manual:1 is what lets the change log tell "you typed this, you can edit it"
+     apart from "this was derived from a supplement, edit it there". */
+  STATE.events.forEach(function (e) { out.push({ date: e.date, kind: e.cat || "other", label: e.label, detail: e.detail || "", ref: e.id, manual: 1 }); });
   out.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
   return out;
 }
@@ -1589,11 +1591,14 @@ function viewTrends() {
   var gOpts = groups.map(function (g) { return '<option value="' + esc(g) + '"' + (g === UI.trendGroup ? " selected" : "") + '>' + (g === "all" ? "All symptoms" : esc(g)) + '</option>'; }).join("");
   var dOpts = [14, 30, 60, 90].map(function (d) { return '<option value="' + d + '"' + (d === UI.trendDays ? " selected" : "") + '>Last ' + d + ' days</option>'; }).join("");
 
-  var recent = changeEvents().filter(function (e) { return e.date >= addDays(todayISO(), -90); }).reverse().slice(0, 8);
+  var recent = changeEvents().filter(function (e) { return e.date >= addDays(todayISO(), -90); }).reverse().slice(0, 14);
   var recentHtml = recent.length ? recent.map(function (e) {
     return '<li style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)"><span class="mono tiny dim" style="flex:none;width:56px">' + fmtShort(e.date) + '</span>' +
       '<span class="grow"><b style="font-weight:500">' + esc(e.label) + '</b>' + (e.detail ? '<br><span class="tiny dim">' + esc(e.detail) + '</span>' : '') + '</span>' +
-      '<span class="pill flagp" style="flex:none">' + catLabel(e.kind) + '</span></li>';
+      '<span style="flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:5px">' +
+      '<span class="pill flagp">' + catLabel(e.kind) + '</span>' +
+      '<button class="btn sm ghost" data-a="' + (e.manual ? 'eventEdit' : 'suppEdit') + '" data-id="' + e.ref + '">Edit</button>' +
+      '</span></li>';
   }).join("") : '<li class="empty">No changes logged in the last 90 days.</li>';
 
   return '<div class="sec" style="margin-top:14px"><span class="eyebrow">Patterns</span></div>' +
@@ -1605,7 +1610,7 @@ function viewTrends() {
     cyclePhaseBlock() +
     '<div class="card"><div class="card-h"><h2>Change log</h2>' +
     '<span class="sub"><button class="btn sm" data-a="eventAdd">Log a change</button></span></div><ul>' + recentHtml + '</ul>' +
-    '<div class="hint" style="margin-top:10px">Supplement starts, stops and dose changes appear here automatically. Add diet changes, illnesses and appointments by hand.</div></div>' +
+    '<div class="hint" style="margin-top:10px">Supplement starts, stops and dose changes appear here automatically. Add diet changes, illnesses and appointments by hand. <b>Edit</b> changes or removes any line \u2014 the ones you typed open here, the ones from a supplement open that supplement.</div></div>' +
     '<div style="height:24px"></div>';
 }
 
@@ -2407,15 +2412,24 @@ function readPdf(file) {
 }
 
 /* ---------- events, cycles, questions, appointments ---------- */
-function openEvent() {
-  var opts = EVENT_CATS.map(function (c) { return '<option value="' + c[0] + '">' + c[1] + '</option>'; }).join("");
-  openModal("event", "Log a change",
-    '<div class="fgrid"><div class="fld"><label class="f">Date</label><input type="date" id="evDate" value="' + CUR + '"></div>' +
+function openEvent(id) {
+  /* One function for add and edit. Getting a category wrong is the single most
+     likely mistake here, so the fix has to be a correction in place, not a
+     delete-and-retype that loses the date and the detail with it. */
+  var e = id ? byIdIn(STATE.events, id) : null;
+  var cur = e ? (e.cat || "other") : "";
+  var opts = EVENT_CATS.map(function (c) {
+    return '<option value="' + c[0] + '"' + (c[0] === cur ? " selected" : "") + '>' + c[1] + '</option>';
+  }).join("");
+  openModal("event", e ? "Edit this change" : "Log a change",
+    '<div class="fgrid"><div class="fld"><label class="f">Date</label><input type="date" id="evDate" value="' + esc(e ? e.date : CUR) + '"></div>' +
     '<div class="fld"><label class="f">Kind</label><select id="evCat">' + opts + '</select></div>' +
-    '<div class="fld" style="grid-column:1/-1"><label class="f">What changed</label><input type="text" id="evLabel" placeholder="Cut gluten"></div>' +
-    '<div class="fld" style="grid-column:1/-1"><label class="f">Detail (optional)</label><input type="text" id="evDetail" placeholder="RD suggested a 6-week trial"></div></div>' +
+    '<div class="fld" style="grid-column:1/-1"><label class="f">What changed</label><input type="text" id="evLabel" placeholder="Cut gluten" value="' + esc(e ? e.label : "") + '"></div>' +
+    '<div class="fld" style="grid-column:1/-1"><label class="f">Detail (optional)</label><input type="text" id="evDetail" placeholder="RD suggested a 6-week trial" value="' + esc(e ? (e.detail || "") : "") + '"></div></div>' +
     '<div class="hint" style="margin-top:10px">Supplement starts, stops and dose changes are added for you — this is for everything else.</div>',
-    '<span style="flex:1"></span><button class="btn" data-a="closeModal">Cancel</button><button class="btn pri" data-a="eventSave">Log it</button>');
+    (e ? '<button class="btn danger" data-a="eventDel" data-id="' + e.id + '">Delete</button>' : '') +
+    '<span style="flex:1"></span><button class="btn" data-a="closeModal">Cancel</button>' +
+    '<button class="btn pri" data-a="eventSave" data-id="' + (e ? e.id : "") + '">' + (e ? "Save change" : "Log it") + '</button>');
 }
 
 function cyclesBody() {
@@ -2975,11 +2989,28 @@ function act(a, t) {
     case "cycleSym": return;
 
     /* ---- events ---- */
-    case "eventAdd": openEvent(); return;
+    case "eventAdd": openEvent(null); return;
+    case "eventEdit": openEvent(id); return;
     case "eventSave": {
       var lb = mv("evLabel"); if (!lb) { toast("What changed?"); return; }
-      STATE.events.push({ id: uid(), date: mv("evDate") || todayISO(), cat: el("evCat").value, label: lb, detail: mv("evDetail") });
+      var evx = id ? byIdIn(STATE.events, id) : null;
+      if (evx) {
+        evx.date = mv("evDate") || evx.date;
+        evx.cat = el("evCat").value;
+        evx.label = lb;
+        evx.detail = mv("evDetail");
+      } else {
+        STATE.events.push({ id: uid(), date: mv("evDate") || todayISO(), cat: el("evCat").value, label: lb, detail: mv("evDetail") });
+      }
       markDirty(); closeModal(); render(); return;
+    }
+    case "eventDel": {
+      var evd = byIdIn(STATE.events, id);
+      openConfirm("Remove this line?", "\u201C" + esc(evd ? evd.label : "This change") + "\u201D will be taken off the change log. Nothing else you have logged is touched.", "Remove", function () {
+        STATE.events = STATE.events.filter(function (x) { return x.id !== id; });
+        markDirty(); render();
+      });
+      return;
     }
 
     /* ---- markers & labs ---- */
@@ -3217,6 +3248,6 @@ if ("serviceWorker" in navigator &&
     navigator.serviceWorker.register("sw.js").catch(function () {});
   });
 }
-<\/script>
+</script>
 </body>
 </html>
