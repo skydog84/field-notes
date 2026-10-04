@@ -2,7 +2,7 @@
    Purpose: after the first visit the app opens with no signal at all.
    It caches the app shell only. It never touches her log — that lives in
    localStorage on the device and is never sent anywhere. */
-var VERSION = 'fn-2026-10-04a';
+var VERSION = 'fn-2026-10-04b';
 var SHELL = ['./', './index.html', './manifest.webmanifest',
              './apple-touch-icon.png', './icon-192.png', './icon-512.png', './icon.svg'];
 

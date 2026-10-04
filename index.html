@@ -525,7 +525,18 @@ function esc(s) {
   return ESC_RE.test(s) ? s.replace(ESC_RE_G, escOne) : s;
 }
 var ESC_RE = /[&<>"]/, ESC_RE_G = /[&<>"]/g;
-function num(v) { var n = parseFloat(v); return isFinite(n) ? n : null; }
+/* "1,200" is twelve hundred, not 1 — strip thousands separators first. */
+function num(v) {
+  if (typeof v === "string" && /^\s*-?\d{1,3}(,\d{3})+(\.\d+)?\s*$/.test(v)) v = v.replace(/,/g, "");
+  var n = parseFloat(v); return isFinite(n) ? n : null;
+}
+/* A lab value as typed or printed: "<9", ">2000", "1,200", "4.1". The < or >
+   is part of the result (below/above what the lab can measure) and is kept. */
+function labQual(v) { var m = /^\s*([<>])/.exec(String(v == null ? "" : v)); return m ? m[1] : ""; }
+function labNum(v) { return num(String(v == null ? "" : v).replace(/^\s*[<>]=?\s*/, "")); }
+function labVal(r) { return (r.qual || "") + r.value; }
+/* "<0.5" means somewhere under 0.5, so it sits below a 0.5 edge, not on it. */
+function statusOf(m, r) { var e = r.qual === "<" ? -1e-9 : r.qual === ">" ? 1e-9 : 0; return rangeStatus(m, r.value + e); }
 function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 function round(v, p) { var m = Math.pow(10, p == null ? 2 : p); return Math.round(v * m) / m; }
 /* a change printed next to other changes needs its sign and a matching decimal */
@@ -585,12 +596,13 @@ function blankState() {
     events: [],
     questions: [],
     appts: [],
-    labNotes: []
+    labNotes: [],
+    refNotes: []
   };
 }
 
 /* Version shown under Setup, so she can tell at a glance she has the update. */
-var APP_VERSION = "2026-10-04";
+var APP_VERSION = "2026-10-04b";
 
 /* Questions grew from {id, text, created} into a record that lives until it is
    actually asked: who it is for, when it was asked, and what the answer was.
@@ -604,6 +616,20 @@ function normQuestion(q) {
   if (q.askedWho == null) q.askedWho = "";
   if (q.answer == null) q.answer = "";
   return q;
+}
+
+/* General lab notes: things she has learned or been told about labs that
+   belong to no single draw or result ("ferritin = iron storage; optimal >70").
+   Each may point at any of her markers, so it also shows on that marker. */
+function normRefNote(n) {
+  if (!n.id) n.id = uid();
+  if (n.title == null) n.title = "";
+  if (n.text == null) n.text = "";
+  if (!Array.isArray(n.markers)) n.markers = [];
+  if (!n.created) n.created = todayISO();
+  if (!n.updated) n.updated = n.created;
+  if (n.print === undefined) n.print = true;
+  return n;
 }
 
 function migrate(s) {
@@ -654,6 +680,7 @@ function migrate(s) {
   (s.questions || []).forEach(normQuestion);
   (s.labNotes || []).forEach(function (n) { if (!n.id) n.id = uid(); if (n.text == null) n.text = ""; if (n.lab == null) n.lab = ""; });
   (s.labs || []).forEach(function (r) { if (r.note == null) r.note = ""; if (r.lab == null) r.lab = ""; });
+  (s.refNotes || []).forEach(normRefNote);
   return s;
 }
 
@@ -663,13 +690,13 @@ function stateCounts(s) {
   Object.keys(s.days || {}).forEach(function (dt) { if (dayHasAnything(s.days[dt])) days++; });
   return {
     days: days, labs: (s.labs || []).length, markers: (s.markers || []).length,
-    labNotes: (s.labNotes || []).length, supps: (s.supps || []).length,
+    labNotes: (s.labNotes || []).length, refNotes: (s.refNotes || []).length, supps: (s.supps || []).length,
     cycles: (s.cycles || []).length, events: (s.events || []).length,
     questions: (s.questions || []).length, appts: (s.appts || []).length
   };
 }
 function countsLine(c) {
-  return c.days + " logged days · " + c.labs + " lab results · " + c.markers + " markers · " + c.labNotes + " lab notes · " +
+  return c.days + " logged days · " + c.labs + " lab results · " + c.markers + " markers · " + c.labNotes + " lab visit notes · " + (c.refNotes || 0) + " general lab notes · " +
     c.supps + " supplements/meds · " + c.cycles + " cycles · " + c.events + " changes · " + c.questions + " questions · " + c.appts + " appointments";
 }
 
@@ -737,7 +764,7 @@ function hasData() {
   return Object.keys(STATE.days || {}).length > 0 ||
     (STATE.labs || []).length > 0 || (STATE.supps || []).length > 0 ||
     (STATE.cycles || []).length > 0 || (STATE.events || []).length > 0 ||
-    (STATE.questions || []).length > 0 || (STATE.labNotes || []).length > 0 ||
+    (STATE.questions || []).length > 0 || (STATE.labNotes || []).length > 0 || (STATE.refNotes || []).length > 0 ||
     (STATE.markers || []).length > 0 || (STATE.appts || []).length > 0;
 }
 
@@ -897,7 +924,7 @@ function draftAny(iso, keys) {
 function dayHasAnything(d) {
   if (!d) return false;
   if (Object.keys(d.s || {}).length) return true;
-  if ((d.bristol || []).length || (d.meals || []).length || (d.act || []).length) return true;
+  if ((d.bristol || []).length || d.bmNone || (d.meals || []).length || (d.act || []).length) return true;
   if (Object.keys(d.supps || {}).length || Object.keys(d.practice || {}).length) return true;
   if (d.sleep && (d.sleep.hours != null || d.sleep.bed || d.sleep.wake)) return true;
   if (d.notes) return true;
@@ -1378,7 +1405,7 @@ function viewToday() {
       '<button class="btn sm" data-a="noneAll">No symptoms today</button>' +
     '</div>';
 
-  var quick = '<div class="hint" style="margin-bottom:14px"><b>No symptoms today</b> marks every severity-rated symptom as None, and logs zero bowel movements. Energy, sleep quality and appetite stay for you to set, since those always have a real value.</div>';
+  var quick = '<div class="hint" style="margin-bottom:14px"><b>No symptoms today</b> marks every severity-rated symptom you haven’t rated yet as None, and logs zero bowel movements if none are logged. Ratings you already entered are kept. Energy, sleep quality and appetite stay for you to set, since those always have a real value.</div>';
 
   /* cycle
      `end` means the bleeding stopped, so it never ends the count — a cycle runs
@@ -1670,8 +1697,8 @@ var THYROID_CORE = ["TSH", "Free T4", "Free T3", "Reverse T3", "TPO antibodies",
 /* order matters — longest / most specific first */
 var ALIASES = [
   ["Reverse T3", "ng/dL", /reverse\s*t\s*-?\s*3|\brt-?3\b/i],
-  ["Free T4", "ng/dL", /free\s*t\s*-?\s*4|t\s*-?\s*4[,\s]*free|\bft-?4\b/i],
-  ["Free T3", "pg/mL", /free\s*t\s*-?\s*3|t\s*-?\s*3[,\s]*free|\bft-?3\b/i],
+  ["Free T4", "ng/dL", /free\s*t\s*-?\s*4|t\s*-?\s*4\)?[,\s]*free|\bft-?4\b|thyroxine\s*,?\s*free/i],
+  ["Free T3", "pg/mL", /free\s*t\s*-?\s*3|t\s*-?\s*3\)?[,\s]*free|\bft-?3\b|triiodothyronine\s*,?\s*free/i],
   ["Total T4", "ug/dL", /total\s*t\s*-?\s*4|t\s*-?\s*4[,\s]*total|thyroxine/i],
   ["Total T3", "ng/dL", /total\s*t\s*-?\s*3|t\s*-?\s*3[,\s]*total|triiodothyronine/i],
   ["TPO antibodies", "IU/mL", /thyroid\s*peroxidase|\btpo\b/i],
@@ -1711,6 +1738,12 @@ function ensureMarker(name, unit) {
 
 /* ---------- parsing pasted lab text ---------- */
 function detectDate(text) {
+  // Reports print several dates; the one that matters is when it was drawn.
+  var cm = text.match(/collect[a-z]*(?:\s*(?:date|on))?\s*[:\-]?\s*([^\n]{0,40})/i);
+  if (cm) { var cd = detectDate1(cm[1]); if (cd) return cd; }
+  return detectDate1(text);
+}
+function detectDate1(text) {
   var m = text.match(/\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b/);
   if (m) return m[1] + "-" + pad(+m[2]) + "-" + pad(+m[3]);
   m = text.match(/\b(\d{1,2})[-/](\d{1,2})[-/](20\d{2})\b/);
@@ -1723,30 +1756,76 @@ function detectDate(text) {
   return null;
 }
 
+/* Pull the result out of whatever follows the marker name. The value is the
+   first number standing on its own — not digits inside the name itself, like
+   the 25 of "Vitamin D, 25-OH", the 3 of "(T3)" or the 1,25 of a different
+   vitamin D test. The printed range comes out first so it can't be taken
+   for the value. */
+var NUM_TOK = "\\d{1,3}(?:,\\d{3})+(?:\\.\\d+)?|\\d+(?:\\.\\d+)?";
+function extractResult(rest) {
+  var rangeLo = null, rangeHi = null;
+  var rm = rest.match(new RegExp("(" + NUM_TOK + ")\\s*(?:-|–|—|to)\\s*(" + NUM_TOK + ")"));
+  if (rm && !/[A-Za-z]$/.test(rest.slice(0, rm.index))) { rangeLo = rm[1]; rangeHi = rm[2]; rest = rest.slice(0, rm.index) + " " + rest.slice(rm.index + rm[0].length); }
+  var vm = rest.match(new RegExp("(?:^|[\\s:])([<>]=?)?\\s*(" + NUM_TOK + ")(?=$|[\\s%A-Za-zµ*])"));
+  if (!vm) return null;
+  var unit = "";
+  var um = rest.match(/(uIU\/mL|µIU\/mL|mIU\/L|ng\/dL|pg\/mL|ng\/mL|ug\/dL|µg\/dL|ug\/L|IU\/mL|mg\/L|mg\/dL|mcg\/dL|pmol\/L|nmol\/L|%)/i);
+  if (um) unit = um[1];
+  return { qual: vm[1] ? vm[1].charAt(0) : "", value: vm[2].replace(/,/g, ""), lo: rangeLo, hi: rangeHi, unit: unit };
+}
+/* Same-size units compare equal: uIU/mL and mIU/L are the same number. */
+function unitKey(u) {
+  u = String(u || "").toLowerCase().replace(/µ/g, "u").replace(/mcg/g, "ug").replace(/\s/g, "");
+  return u === "miu/l" ? "uiu/ml" : u;
+}
+/* Lines that name a marker but are not that marker's result. */
+function notThisMarker(name, line) {
+  if (/\bpanel\b|\bprofile\b/i.test(line)) return true;
+  if (/^(Free T4|Free T3|Total T4|Total T3)$/.test(name) && /\bindex\b|uptake|\bt7\b|\bfti\b/i.test(line)) return true;
+  if (name === "Vitamin D, 25-OH" && /1\s*,\s*25|dihydroxy/i.test(line)) return true;
+  return false;
+}
+function lineNamesAMarker(line) {
+  if (!line) return false;
+  for (var a = 0; a < ALIASES.length; a++) if (ALIASES[a][2].test(line)) return true;
+  var low = line.toLowerCase();
+  return (STATE.markers || []).some(function (m) { return m.name.length >= 2 && low.indexOf(m.name.toLowerCase()) === 0; });
+}
+
 function parseLabText(text) {
   var lines = String(text).replace(/\r/g, "").split("\n"), out = [], seen = {};
+  function nextValueLine(i) {
+    // A report that wraps the value onto the next line. Never borrow that line
+    // when it names a marker of its own, or one result lands under two names.
+    var nx = i + 1 < lines.length ? lines[i + 1].trim() : "";
+    return nx && !lineNamesAMarker(nx) ? nx : "";
+  }
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i].trim();
     if (!line || line.length > 220) continue;
+    var matched = false;
     for (var a = 0; a < ALIASES.length; a++) {
       var al = ALIASES[a], m = line.match(al[2]);
       if (!m) continue;
-      if (seen[al[0]]) break;
+      matched = true;
+      var reflex = /w\/\s*reflex|with reflex|reflex to/i.test(line);
+      if (reflex) {
+        // "TSH W/REFLEX TO FT4 2.71": the result belongs to the test named first.
+        var first = null;
+        for (var a2 = 0; a2 < ALIASES.length; a2++) { var m2 = line.match(ALIASES[a2][2]); if (m2 && (!first || m2.index < first.m.index)) first = { al: ALIASES[a2], m: m2 }; }
+        al = first.al; m = first.m;
+      }
+      if (seen[al[0]] || notThisMarker(al[0], line)) break;
       var rest = line.slice(m.index + m[0].length);
-      if (!/\d/.test(rest) && i + 1 < lines.length) rest = lines[i + 1];
-      var rangeLo = null, rangeHi = null;
-      var rm = rest.match(/(\d+(?:\.\d+)?)\s*(?:-|–|—|to)\s*(\d+(?:\.\d+)?)/);
-      if (rm) { rangeLo = rm[1]; rangeHi = rm[2]; rest = rest.replace(rm[0], " "); }
-      var vm = rest.match(/(<|>)?\s*(\d+(?:\.\d+)?)/);
-      if (!vm) break;
-      var unit = "";
-      var um = rest.match(/(uIU\/mL|mIU\/L|ng\/dL|pg\/mL|ng\/mL|ug\/dL|ug\/L|IU\/mL|mg\/L|mg\/dL|mcg\/dL|%)/i);
-      if (um) unit = um[1];
-      out.push({ use: true, name: al[0], unit: unit || al[1], value: vm[2], lo: rangeLo, hi: rangeHi, raw: line });
+      if (reflex) rest = rest.replace(/^.*?reflex(?:\s*to)?\s*[A-Za-z0-9 ,]*?(?=\s[<>]?\d|$)/i, " ");
+      var r = extractResult(rest);
+      if (!r && !reflex) { var nx = nextValueLine(i); if (nx) r = extractResult(" " + nx); }
+      if (!r) break;
+      out.push({ use: true, name: al[0], unit: r.unit || al[1], value: r.qual + r.value, lo: r.lo, hi: r.hi, raw: line });
       seen[al[0]] = 1;
       break;
     }
-    if (a < ALIASES.length) continue;
+    if (matched) continue;
     /* Not one of the built-in names: try the markers she has set up herself,
        so anything she adds (CBC, lipids, iron panel extras) imports too. */
     var low = line.toLowerCase();
@@ -1756,12 +1835,9 @@ function parseLabText(text) {
       if (seen[nm] || nl.length < 2 || low.indexOf(nl) !== 0) continue;
       var rest2 = line.slice(nm.length);
       if (/^[a-z0-9]/i.test(rest2)) continue;           // "Iron" must not match "Ironwood"
-      var rlo = null, rhi = null;
-      var rm2 = rest2.match(/(\d+(?:\.\d+)?)\s*(?:-|–|—|to)\s*(\d+(?:\.\d+)?)/);
-      if (rm2) { rlo = rm2[1]; rhi = rm2[2]; rest2 = rest2.replace(rm2[0], " "); }
-      var vm2 = rest2.match(/(<|>)?\s*(\d+(?:\.\d+)?)/);
-      if (!vm2) break;
-      out.push({ use: true, name: nm, unit: mine[k].unit, value: vm2[2], lo: rlo, hi: rhi, raw: line });
+      var r2 = extractResult(rest2);
+      if (!r2) break;
+      out.push({ use: true, name: nm, unit: mine[k].unit, value: r2.qual + r2.value, lo: r2.lo, hi: r2.hi, raw: line });
       seen[nm] = 1;
       break;
     }
@@ -1882,7 +1958,7 @@ function labChart(m) {
   // last value label
   var lastR = res[res.length - 1];
   var lx = X(lastR.date), ly = Y(lastR.value);
-  s += '<text x="' + round(Math.min(lx + 9, W - padR - 2), 1) + '" y="' + round(ly - 9, 1) + '" text-anchor="' + (lx > W - 90 ? "end" : "start") + '" fill="var(--ink)" font-size="11">' + lastR.value + '</text>';
+  s += '<text x="' + round(Math.min(lx + 9, W - padR - 2), 1) + '" y="' + round(ly - 9, 1) + '" text-anchor="' + (lx > W - 90 ? "end" : "start") + '" fill="var(--ink)" font-size="11">' + esc(labVal(lastR)) + '</text>';
 
   // x labels
   var xt = [xa, addDays(xa, Math.round(span / 2)), xb];
@@ -1890,7 +1966,7 @@ function labChart(m) {
     s += '<text x="' + round(X(dt), 1) + '" y="' + (H - 14) + '" text-anchor="' + (i === 0 ? "start" : i === 2 ? "end" : "middle") + '">' + fmtShort(dt) + " '" + String(parseISO(dt).getFullYear()).slice(2) + '</text>';
   });
 
-  LABPTS = res.map(function (r) { return { x: X(r.date), y: Y(r.value), date: r.date, value: r.value, lab: r.lab || "" }; });
+  LABPTS = res.map(function (r) { return { x: X(r.date), y: Y(r.value), date: r.date, value: r.value, qual: r.qual || "", lab: r.lab || "" }; });
 
   var legend = '<div class="legend">' +
     (bf ? '<span><i style="background:var(--accent-soft);box-shadow:inset 0 0 0 1px var(--accent)"></i>Functional range ' + esc(rangeText(m.fl, m.fh)) + '</span>' : '') +
@@ -1931,8 +2007,8 @@ function wireLabChart() {
     LABPTS.forEach(function (p) { var d = Math.abs(p.x - mx); if (d < bd) { bd = d; best = p; } });
     if (!best || bd > 120) { tip.hidden = true; return; }
     var m = byIdIn(STATE.markers, UI.labMarker);
-    var st = m ? rangeStatus(m, best.value) : null;
-    tip.innerHTML = '<div class="dim tiny">' + fmtMed(best.date) + '</div><b>' + best.value + '</b> <span class="dim tiny">' + esc(m ? m.unit : "") + '</span>' +
+    var st = m ? statusOf(m, best) : null;
+    tip.innerHTML = '<div class="dim tiny">' + fmtMed(best.date) + '</div><b>' + esc(labVal(best)) + '</b> <span class="dim tiny">' + esc(m ? m.unit : "") + '</span>' +
       (st ? '<div class="tiny" style="color:var(--' + st.k + ');margin-top:2px">' + st.t + '</div>' : "") +
       (best.lab ? '<div class="tiny dim">' + esc(best.lab) + '</div>' : "");
     tip.hidden = false;
@@ -1957,7 +2033,7 @@ function viewLabs() {
       'Add the markers you actually get drawn, then enter your own reference ranges once.<br>They apply to every result from then on.<br>' +
       '<div class="row" style="justify-content:center;margin-top:16px">' +
       '<button class="btn pri" data-a="markerPreset">Add the standard thyroid panel</button>' +
-      '<button class="btn" data-a="markerAdd">Add one marker</button></div></div></div>';
+      '<button class="btn" data-a="markerAdd">Add one marker</button></div></div></div>' + refNotesCard();
   }
   if (!UI.labMarker || !byIdIn(STATE.markers, UI.labMarker)) UI.labMarker = STATE.markers[0].id;
   var m = byIdIn(STATE.markers, UI.labMarker);
@@ -1970,11 +2046,11 @@ function viewLabs() {
 
   var latest = res.length ? res[res.length - 1] : null;
   var prev = res.length > 1 ? res[res.length - 2] : null;
-  var st = latest ? rangeStatus(m, latest.value) : null;
+  var st = latest ? statusOf(m, latest) : null;
   var delta = latest && prev ? latest.value - prev.value : null;
 
   var head = '<div class="card"><div class="card-h"><h2>' + esc(m.name) + '</h2>' +
-    '<span class="sub">' + (latest ? '<span class="mono" style="font-size:20px;color:var(--ink)">' + latest.value + '</span> <span class="dim">' + esc(m.unit) + '</span>' : "no results") + '</span></div>' +
+    '<span class="sub">' + (latest ? '<span class="mono" style="font-size:20px;color:var(--ink)">' + esc(labVal(latest)) + '</span> <span class="dim">' + esc(m.unit) + '</span>' : "no results") + '</span></div>' +
     (latest ? '<div class="row" style="margin:-4px 0 14px">' +
       (st ? '<span class="pill ' + st.k + '">' + st.t + '</span>' : '<span class="pill">No range set</span>') +
       '<span class="tiny dim">drawn ' + fmtMed(latest.date) + (latest.lab ? " · " + esc(latest.lab) : "") + '</span>' +
@@ -1993,8 +2069,8 @@ function viewLabs() {
     '<div class="row" style="margin-top:12px"><button class="btn sm danger" data-a="markerDel" data-id="' + m.id + '">Delete this marker</button></div></div>';
 
   var rows = res.slice().reverse().map(function (r) {
-    var s2 = rangeStatus(m, r.value);
-    return '<tr><td class="mono">' + fmtMed(r.date) + '</td><td class="num">' + r.value + '</td>' +
+    var s2 = statusOf(m, r);
+    return '<tr><td class="mono">' + fmtMed(r.date) + '</td><td class="num">' + esc(labVal(r)) + '</td>' +
       '<td>' + (s2 ? '<span class="pill ' + s2.k + '">' + s2.t + '</span>' : '<span class="dim tiny">—</span>') + '</td>' +
       '<td class="tiny dim">' + esc(r.lab || "") + esc(r.note ? (r.lab ? " · " : "") + r.note : "") + '</td>' +
       '<td style="text-align:right"><button class="btn sm" data-a="labEdit" data-id="' + r.id + '">Edit</button></td></tr>';
@@ -2013,7 +2089,7 @@ function viewLabs() {
 
   return '<div class="sec" style="margin-top:14px"><span class="eyebrow">Markers</span></div>' +
     '<div class="row" style="gap:6px;margin-bottom:14px">' + chips + '</div>' +
-    actions + head + ranges + table + labVisitsCard() + '<div style="height:24px"></div>';
+    actions + head + markerRefNotes(m) + ranges + table + refNotesCard() + labVisitsCard() + '<div style="height:24px"></div>';
 }
 
 /* ---------- lab visits: one note for the whole draw ----------
@@ -2070,6 +2146,93 @@ function addLabNote(date, lab, text) {
   else STATE.labNotes.push({ id: uid(), date: date, lab: lab || "", text: text });
 }
 
+/* ---------- general lab notes ---------- */
+function refNoteTitle(n) {
+  if (n.title) return n.title;
+  var first = String(n.text || "").split("\n")[0].trim();
+  return first.length > 70 ? first.slice(0, 67) + "…" : first;
+}
+function refNotesSorted() {
+  return STATE.refNotes.slice().sort(function (a, b) { return (b.updated || "") < (a.updated || "") ? -1 : (b.updated || "") > (a.updated || "") ? 1 : 0; });
+}
+function markerChipsFor(n) {
+  return n.markers.map(function (mid) { var m = byIdIn(STATE.markers, mid); return m ? '<span class="pill" style="margin:4px 4px 0 0">' + esc(m.name) + '</span>' : ''; }).join("");
+}
+function refNoteBlock(n, showChips) {
+  var body = n.title ? n.text : String(n.text || "").split("\n").slice(1).join("\n").trim();
+  return '<div class="supp-row" style="align-items:flex-start"><div class="supp-nm" style="flex:1 1 220px">' + esc(refNoteTitle(n)) +
+    (body ? '<div style="margin-top:4px;font-size:13.5px;font-weight:400;color:var(--ink);white-space:pre-wrap">' + esc(body) + '</div>' : '') +
+    '<small>updated ' + fmtMed(n.updated) + (n.print ? '' : ' · not printed') + '</small>' +
+    (showChips ? markerChipsFor(n) : '') + '</div>' +
+    '<button class="btn sm ghost" data-a="refEdit" data-id="' + n.id + '">Edit</button></div>';
+}
+function refNotesCard() {
+  var list = refNotesSorted();
+  return '<div class="card"><div class="card-h"><h2>My lab notes</h2><span class="sub">not tied to one visit</span></div>' +
+    (list.length ? list.map(function (n) { return refNoteBlock(n, true); }).join("")
+      : '<div class="hint">Things you have learned or been told about your labs — what a marker means, optimal ranges, what to ask about. Link a note to a marker and it also shows on that marker’s page and prints on your summary.</div>') +
+    '<div class="row" style="margin-top:10px"><button class="btn sm" data-a="refNew">Add a lab note</button></div></div>';
+}
+function markerRefNotes(m) {
+  var list = refNotesSorted().filter(function (n) { return n.markers.indexOf(m.id) >= 0; });
+  if (!list.length) return "";
+  return '<div class="card"><div class="card-h"><h2>Your notes on ' + esc(m.name) + '</h2><span class="sub">' + list.length + '</span></div>' +
+    list.map(function (n) { return refNoteBlock(n, false); }).join("") + '</div>';
+}
+/* Which of her markers a note mentions, so the boxes can tick themselves while
+   she types. Only ever a suggestion: a box she touched stays how she left it.
+   "iron storage" is how people describe ferritin, so it doesn't count as Iron. */
+function markersMentioned(text) {
+  var t = String(text || ""), hits = {};
+  var tIron = t.replace(/iron\s*(storage|stores?)/gi, " ");
+  STATE.markers.forEach(function (m) {
+    var nm = m.name.toLowerCase().replace(/[^a-z0-9]/g, "");
+    var flat = t.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (nm.length >= 3 && flat.indexOf(nm) >= 0 && !(nm === "iron" && !/\biron\b/i.test(tIron))) hits[m.id] = 1;
+  });
+  ALIASES.forEach(function (al) {
+    var src = al[0] === "Iron" ? tIron : t;
+    if (!al[2].test(src)) return;
+    var m = findMarkerByName(al[0]); if (m) hits[m.id] = 1;
+  });
+  return hits;
+}
+function openRefNote(id) {
+  var n = id ? byIdIn(STATE.refNotes, id) : null;
+  var on = {}; (n ? n.markers : []).forEach(function (x) { on[x] = 1; });
+  var boxes = STATE.markers.map(function (m) {
+    return '<label style="display:inline-flex;gap:6px;align-items:center;padding:4px 10px 4px 0;font-size:14px"><input type="checkbox" data-rn-mk="' + m.id + '" style="width:auto"' + (on[m.id] ? ' checked' : '') + '> ' + esc(m.name) + '</label>';
+  }).join("");
+  openModal("refNote", n ? "Edit lab note" : "Add a lab note",
+    '<div class="fld"><label class="f">Title (optional)</label><input type="text" id="rnTitle" value="' + esc(n ? n.title : "") + '" placeholder="Ferritin and fatigue"></div>' +
+    '<div class="fld" style="margin-top:10px"><label class="f">Note</label>' +
+    '<textarea id="rnText" style="min-height:160px" placeholder="Ferritin = iron storage marker. Hypo can’t convert T4 to T3 without enough stored iron. Optimal >70.">' + esc(n ? n.text : "") + '</textarea></div>' +
+    (STATE.markers.length ? '<div class="sec"><span class="eyebrow">About which markers</span></div><div id="rnMarkers">' + boxes + '</div>' +
+      '<div class="hint" style="margin-top:4px">Ticked automatically when the note names one of your markers — change them however you like. Leave all unticked for a general note.</div>' : '') +
+    '<label style="display:flex;gap:8px;align-items:center;margin-top:12px;font-size:14px"><input type="checkbox" id="rnPrint" style="width:auto"' + (!n || n.print ? ' checked' : '') + '> Include on the printed summary</label>' +
+    '<div class="hint" style="margin-top:8px">If a note gives a range you want the app to flag against (like “optimal 50–100”), also put it in that marker’s <b>Functional low / high</b> boxes.</div>',
+    (n ? '<button class="btn danger" data-a="refDel" data-id="' + n.id + '">Delete</button>' : '') +
+    '<span style="flex:1"></span><button class="btn" data-a="closeModal">Cancel</button>' +
+    '<button class="btn pri" data-a="refSave" data-id="' + (n ? n.id : "") + '">Save note</button>');
+  var touched = {}, auto = {};
+  var host = el("rnMarkers"), ta = el("rnText"), ti = el("rnTitle");
+  if (host) host.addEventListener("change", function (e) { var k = e.target.getAttribute("data-rn-mk"); if (k) touched[k] = 1; });
+  function suggest() {
+    if (!host) return;
+    var hits = markersMentioned((ti ? ti.value : "") + "\n" + (ta ? ta.value : ""));
+    var bs = host.querySelectorAll("[data-rn-mk]");
+    for (var i = 0; i < bs.length; i++) {
+      var k = bs[i].getAttribute("data-rn-mk");
+      if (touched[k]) continue;
+      if (hits[k] && !bs[i].checked) { bs[i].checked = true; auto[k] = 1; }
+      else if (!hits[k] && auto[k]) { bs[i].checked = false; delete auto[k]; }   // only undo our own guess
+    }
+  }
+  if (ta) ta.addEventListener("input", suggest);
+  if (ti) ti.addEventListener("input", suggest);
+  if (!n) setTimeout(function () { if (ta) ta.focus(); }, 30);
+}
+
 /* ---------- edit one result ---------- */
 function openLabEdit(id) {
   var r = byIdIn(STATE.labs, id); if (!r) return;
@@ -2077,7 +2240,7 @@ function openLabEdit(id) {
   openModal("labEdit", "Edit result",
     '<div class="fgrid"><div class="fld" style="grid-column:1/-1"><label class="f">Marker</label><select id="leMk">' + opts + '</select></div>' +
     '<div class="fld"><label class="f">Date drawn</label><input type="date" id="leDate" value="' + esc(r.date) + '" max="' + todayISO() + '"></div>' +
-    '<div class="fld"><label class="f">Value</label><input type="text" inputmode="decimal" id="leVal" value="' + esc(r.value) + '"></div>' +
+    '<div class="fld"><label class="f">Value</label><input type="text" id="leVal" value="' + esc(labVal(r)) + '"></div>' +
     '<div class="fld"><label class="f">Lab</label><input type="text" id="leLab" value="' + esc(r.lab || "") + '"></div>' +
     '<div class="fld" style="grid-column:1/-1"><label class="f">Note on this result</label><textarea id="leNote" placeholder="Fasting, before dose">' + esc(r.note || "") + '</textarea></div></div>' +
     '<div class="hint" style="margin-top:10px">For a note about the whole lab visit, use <b>Lab visits &amp; notes</b> further down the Labs page.</div>',
@@ -2175,8 +2338,8 @@ function showMarkerBulk(rows) {
 /* ============================================================
    Meds & supplements
    ============================================================ */
-function adherence(s, days) {
-  var to = todayISO(), from = addDays(to, -(days - 1));
+function adherence(s, days, upTo) {
+  var to = upTo || todayISO(), from = addDays(to, -(days - 1));
   if (s.start && s.start > from) from = s.start;
   var end = s.end && s.end < to ? s.end : to;
   if (from > end) return null;
@@ -2266,13 +2429,34 @@ function pastAppts() {
   return STATE.appts.filter(function (a) { return a.date && a.date <= todayISO(); })
     .sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
 }
+/* The first day anything was recorded — the start of "everything so far",
+   which is what a new provider wants to see. */
+function trackingStart() {
+  var first = todayISO();
+  Object.keys(STATE.days).forEach(function (dt) { if (dt < first && dayHasAnything(STATE.days[dt])) first = dt; });
+  STATE.labs.forEach(function (r) { if (r.date && r.date < first) first = r.date; });
+  STATE.cycles.forEach(function (c) { if (c.start && c.start < first) first = c.start; });
+  return first;
+}
+function nextVisit() {
+  var t = todayISO();
+  var a = STATE.appts.filter(function (x) { return x.date && x.date >= t; }).sort(function (x, y) { return x.date < y.date ? -1 : 1; });
+  return a[0] || null;
+}
+function lastVisitBeforeToday() {
+  var a = pastAppts().filter(function (x) { return x.date < todayISO(); });
+  return a.length ? a[a.length - 1] : null;
+}
 function summaryPeriod() {
   var appts = pastAppts();
-  var last = appts.length ? appts[appts.length - 1] : null;
+  var last = lastVisitBeforeToday();
   var pick = UI.sumPick || "";
   if (pick === "custom" && UI.sumFrom && UI.sumTo) {
     var f = UI.sumFrom <= UI.sumTo ? UI.sumFrom : UI.sumTo, t = UI.sumFrom <= UI.sumTo ? UI.sumTo : UI.sumFrom;
     return { from: f, to: t, since: null, upTo: null, past: t < todayISO(), custom: true };
+  }
+  if (pick === "all") {
+    return { from: trackingStart(), to: todayISO(), since: null, upTo: null, past: false, all: true };
   }
   if (pick.indexOf("appt:") === 0) {
     var aid = pick.slice(5);
@@ -2366,13 +2550,16 @@ function openQuestion(id, markAsked) {
 function periodPicker(P) {
   var appts = pastAppts().slice().reverse();
   var pick = UI.sumPick || "";
-  var opts = '<option value="">Since your last visit' + (appts.length ? ' (' + fmtShort(appts[0].date) + ')' : '') + ' — now</option>' +
+  var lv = lastVisitBeforeToday(), nv = nextVisit();
+  var opts = '<option value="">' + (lv ? 'Since your last visit (' + fmtShort(lv.date) + ') — now' : 'Last 60 days — now') + '</option>' +
+    '<option value="all"' + (pick === "all" ? " selected" : "") + '>Everything since you started (' + fmtShort(trackingStart()) + ') — for a new provider</option>' +
     appts.map(function (a) { return '<option value="appt:' + a.id + '"' + (pick === "appt:" + a.id ? " selected" : "") + '>Leading up to ' + esc(apptLabel(a)) + '</option>'; }).join("") +
     '<option value="custom"' + (pick === "custom" ? " selected" : "") + '>Pick dates…</option>';
   return '<div class="card noprint" style="padding:12px 16px"><div class="row" style="gap:10px">' +
     '<label class="f" style="margin:0">Showing</label><select data-a="sumPick" style="flex:1;min-width:200px;width:auto">' + opts + '</select></div>' +
     (pick === "custom" ? '<div class="fgrid" style="margin-top:10px"><div class="fld"><label class="f">From</label><input type="date" data-a="sumFrom" value="' + esc(UI.sumFrom || P.from) + '" max="' + todayISO() + '"></div>' +
       '<div class="fld"><label class="f">To</label><input type="date" data-a="sumTo" value="' + esc(UI.sumTo || P.to) + '" max="' + todayISO() + '"></div></div>' : '') +
+    (nv ? '<div class="hint" style="margin-top:8px">Next visit: <b>' + esc(apptLabel(nv)) + '</b>' + (nv.who && !sameWho(UI.qWho, nv.who) ? ' <button class="btn sm ghost" data-a="qWhoSet" data-v="' + esc(nv.who) + '" style="min-height:32px">Only questions for ' + esc(nv.who) + '</button>' : '') + '</div>' : '') +
     (P.past || P.custom ? '<div class="hint" style="margin-top:8px">' + (P.past ? 'Looking back.' : 'Custom dates.') + ' <button class="btn sm ghost" data-a="sumNow" style="min-height:32px">Back to now</button></div>' : '') +
     '</div>';
 }
@@ -2417,7 +2604,7 @@ function viewSummary() {
   }).join("") + '</ul>' : '<p class="dim">Not enough logged days in both this period and the one before it to compare yet.</p>';
 
   var worstHtml = worst.length ? '<ul>' + worst.map(function (m) {
-    return '<li>' + esc(m.s.name) + ' — average <b>' + round(m.cur.mean, 1) + '</b> of 5 across ' + m.cur.n + ' days' +
+    return '<li>' + esc(m.s.name) + ' — average <b>' + round(m.cur.mean, 1) + '</b> of 5 (1 = none) across ' + m.cur.n + ' days' +
       (m.cur.n ? ', ' + Math.round(100 * seriesFor(m.s.id, from, to).filter(function (p) { return p.v >= 3; }).length / m.cur.n) + '% of logged days at moderate or worse' : '') + '</li>';
   }).join("") + '</ul>' : '<p class="dim">No severity-rated symptoms logged in this period.</p>';
 
@@ -2427,8 +2614,8 @@ function viewSummary() {
       var res = markerResults(m.id);
       if (!res.length) return "";
       var last = res[res.length - 1], prev = res.length > 1 ? res[res.length - 2] : null;
-      var st = rangeStatus(m, last.value);
-      return '<tr><td>' + esc(m.name) + '</td><td class="num">' + last.value + ' <span class="dim">' + esc(m.unit) + '</span></td>' +
+      var st = statusOf(m, last);
+      return '<tr><td>' + esc(m.name) + '</td><td class="num">' + esc(labVal(last)) + ' <span class="dim">' + esc(m.unit) + '</span></td>' +
         '<td class="mono tiny">' + fmtShort(last.date) + '</td>' +
         '<td class="num tiny">' + (prev ? signed(last.value - prev.value) + ' vs ' + fmtShort(prev.date) : '—') + '</td>' +
         '<td class="tiny' + (m.sl || m.sh ? '' : ' dim') + '">' + esc(rangeText(m.sl, m.sh)) + '</td>' +
@@ -2441,10 +2628,10 @@ function viewSummary() {
 
   var onNow = suppsOn(to);
   var suppHtml = onNow.length ? '<ul>' + onNow.map(function (s) {
-    var ad = adherence(s, Math.min(90, daysBetween(from, to) + 1));
-    var sd = startDose(s);
-    var moved = !!(sd && sd !== s.dose);
-    return '<li>' + esc(s.name) + (s.dose ? ', ' + esc(s.dose) + (moved ? ' now' : '') : '') + ' — ' + esc(freqLabel(s.freq)) + ', since ' + fmtMed(s.start) +
+    var ad = adherence(s, daysBetween(from, to) + 1, to);
+    var sd = startDose(s), dNow = doseOn(s, to) || s.dose;
+    var moved = !!(sd && sd !== dNow);
+    return '<li>' + esc(s.name) + (dNow ? ', ' + esc(dNow) + (moved ? (P.past || P.custom ? ' by ' + fmtShort(to) : ' now') : '') : '') + ' — ' + esc(freqLabel(s.freq)) + ', since ' + fmtMed(s.start) +
       (moved ? ' (started at ' + esc(sd) + ')' : '') +
       (ad ? ' <span class="dim tiny">(' + ad.taken + ' taken / ' + ad.skipped + ' missed / ' + ad.unlogged + ' unlogged over ' + ad.days + ' days' +
         (ad.dueDays != null ? '; ~' + ad.dueDays + ' days due' : '') + ')</span>' : '') + '</li>';
@@ -2502,6 +2689,56 @@ function viewSummary() {
     return '<li><b>' + fmtMed(n.date) + '</b>' + (n.lab ? ' (' + esc(n.lab) + ')' : '') + ' — <span style="white-space:pre-wrap">' + esc(n.text) + '</span></li>';
   }).join("") + '</ul></div>';
 
+  /* Food, digestion, sleep — what a dietitian asks about first. */
+  var foodDays = [], bmDays = 0, bmTotal = 0, bris = [0, 0, 0, 0, 0, 0, 0, 0], sleepH = [], actDays = 0, actMin = 0, prac = {}, dnotes = [];
+  for (var dd2 = from; dd2 <= to; dd2 = addDays(dd2, 1)) {
+    var dy = D(dd2); if (!dy) continue;
+    if ((dy.meals || []).length) foodDays.push({ date: dd2, meals: dy.meals });
+    if ((dy.bristol || []).length || dy.bmNone) { bmDays++; bmTotal += (dy.bristol || []).length; (dy.bristol || []).forEach(function (b) { if (b >= 1 && b <= 7) bris[b]++; }); }
+    if (dy.sleep && dy.sleep.hours != null && isFinite(dy.sleep.hours)) sleepH.push(+dy.sleep.hours);
+    if ((dy.act || []).length) { actDays++; dy.act.forEach(function (x) { actMin += +x.min || 0; }); }
+    Object.keys(dy.practice || {}).forEach(function (k) { if (dy.practice[k]) prac[k] = (prac[k] || 0) + 1; });
+    if (dy.notes && String(dy.notes).trim()) dnotes.push({ date: dd2, text: String(dy.notes).trim() });
+  }
+  var FOOD_MAX = 14, shownFood = foodDays.slice(-FOOD_MAX);
+  var foodHtml = foodDays.length
+    ? '<p class="tiny dim">Meals logged on ' + foodDays.length + ' of ' + cov.t + ' days' + (foodDays.length > FOOD_MAX ? '; the most recent ' + FOOD_MAX + ' are listed' : '') + '.</p>' +
+      '<ul>' + shownFood.map(function (f) {
+        return '<li><b>' + fmtShort(f.date) + '</b> — ' + f.meals.map(function (m) {
+          return esc(m.what || "Meal") + (m.time ? ' <span class="dim tiny">' + esc(m.time) + '</span>' : '') + (m.note ? ' <span class="dim">(' + esc(m.note) + ')</span>' : '');
+        }).join('; ') + '</li>';
+      }).join("") + '</ul>'
+    : '<p class="dim">No meals logged in this period.</p>';
+  var bTot = bris.reduce(function (a, b) { return a + b; }, 0);
+  function pct(n, d) { return d ? Math.round(100 * n / d) + '%' : '—'; }
+  var digBits = [];
+  if (bmDays) {
+    digBits.push('<li>Bowel movements: <b>' + round(bmTotal / bmDays, 1) + ' per day</b> on average, across ' + bmDays + ' days logged (days never logged are left out).</li>');
+    if (bTot) digBits.push('<li>Bristol type: ' + [1, 2, 3, 4, 5, 6, 7].filter(function (k) { return bris[k]; }).map(function (k) { return 'type ' + k + ' ×' + bris[k]; }).join(', ') +
+      ' — <b>' + pct(bris[1] + bris[2], bTot) + '</b> hard (1–2), <b>' + pct(bris[3] + bris[4] + bris[5], bTot) + '</b> typical (3–5), <b>' + pct(bris[6] + bris[7], bTot) + '</b> loose (6–7).</li>');
+  }
+  if (sleepH.length) digBits.push('<li>Sleep: <b>' + round(sleepH.reduce(function (a, b) { return a + b; }, 0) / sleepH.length, 1) + ' hours</b> a night on average, across ' + sleepH.length + ' nights logged (range ' + Math.min.apply(null, sleepH) + '–' + Math.max.apply(null, sleepH) + ').</li>');
+  if (actDays) digBits.push('<li>Activity on ' + actDays + ' days' + (actMin ? ', ' + actMin + ' minutes in all' : '') + '.</li>');
+  var pk = Object.keys(prac);
+  if (pk.length) digBits.push('<li>Stress-relief practices: ' + pk.map(function (k) { var nm = k; PRACTICES.forEach(function (p2) { if (p2[0] === k) nm = p2[1]; }); return esc(nm) + ' ×' + prac[k]; }).join(', ') + '.</li>');
+  var digHtml = digBits.length ? '<ul>' + digBits.join("") + '</ul>' : '<p class="dim">No digestion, sleep or activity logged in this period.</p>';
+  var NOTE_MAX = 20, shownNotes = dnotes.slice(-NOTE_MAX);
+  var notesHtml = dnotes.length ? (dnotes.length > NOTE_MAX ? '<p class="tiny dim">The most recent ' + NOTE_MAX + ' of ' + dnotes.length + '.</p>' : '') +
+    '<ul>' + shownNotes.map(function (n) { return '<li><b>' + fmtShort(n.date) + '</b> — <span style="white-space:pre-wrap">' + esc(n.text) + '</span></li>'; }).join("") + '</ul>' : '';
+
+  /* Who she sees — the profile has always had room for this. */
+  var team = [["RD", STATE.profile.rd], ["Endo", STATE.profile.endo], ["PCP", STATE.profile.pcp]].filter(function (x) { return x[1]; })
+    .map(function (x) { return x[0] + ': ' + esc(x[1]); }).join(' · ');
+  var nv2 = nextVisit();
+
+  /* Her general lab notes — the ones she left ticked for printing. */
+  var rnotes = refNotesSorted().filter(function (n) { return n.print && (n.text || n.title); });
+  var refHtml = rnotes.length ? '<ul>' + rnotes.map(function (n) {
+    var mk = n.markers.map(function (x) { var m = byIdIn(STATE.markers, x); return m ? m.name : ""; }).filter(Boolean);
+    return '<li>' + (n.title ? '<b>' + esc(n.title) + '</b>' + (mk.length ? ' <span class="dim tiny">(' + esc(mk.join(", ")) + ')</span>' : '') + '<br>' : (mk.length ? '<span class="dim tiny">' + esc(mk.join(", ")) + ':</span> ' : '')) +
+      '<span style="white-space:pre-wrap">' + esc(n.text) + '</span></li>';
+  }).join("") + '</ul>' : '';
+
   var apptOpts = STATE.appts.slice().sort(function (a, b) { return b.date < a.date ? -1 : 1; });
 
   return '<div class="sec" style="margin-top:14px"><span class="eyebrow">For your appointment</span></div>' +
@@ -2518,7 +2755,9 @@ function viewSummary() {
       '<div class="rmeta">' + fmtMed(from) + ' – ' + fmtMed(to) + ' · ' + (daysBetween(from, to) + 1) + ' days · ' + cov.n + ' day' + (cov.n === 1 ? "" : "s") + ' with entries' +
       (P.upTo ? ' · leading up to visit' + (P.upTo.who ? ' with ' + esc(P.upTo.who) : '') + ' on ' + fmtMed(P.upTo.date) : '') +
       (P.since ? ' · since visit with ' + esc(P.since.who || "clinician") : '') +
-      (UI.qWho ? ' · questions for ' + esc(UI.qWho) : '') + '</div>' +
+      (UI.qWho ? ' · questions for ' + esc(UI.qWho) : '') +
+      (!P.past && nv2 ? ' · for visit' + (nv2.who ? ' with ' + esc(nv2.who) : '') + ' on ' + fmtMed(nv2.date) : '') + '</div>' +
+      (team ? '<div class="rmeta">Care team — ' + team + '</div>' : '') +
       '<div class="rrule"></div>' +
       /* Each heading travels with its own block inside one .rsec, which is what
          the print stylesheet keeps whole. Before this the sections were loose
@@ -2528,11 +2767,15 @@ function viewSummary() {
       rsec("Symptoms that moved most", moverHtml) +
       rsec("Where things sit now", worstHtml) +
       rsec("Labs", labHtml) +
+      (refHtml ? rsec("My notes on labs", refHtml) : '') +
       rsec("Supplements &amp; medications", suppHtml) +
       rsec("Cycle", cycHtml) +
+      rsec("Food log", foodHtml) +
+      rsec("Digestion, sleep &amp; activity", digHtml) +
+      (notesHtml ? rsec("Day notes", notesHtml) : '') +
       rsec(P.past ? "Questions going into this visit" : "Questions to ask", qHtml) +
       (ansHtml ? rsec("Asked &amp; answered in this period", ansHtml) : '') +
-      '<p class="rmeta" style="margin-top:22px">Self-reported daily ratings on a 1–5 scale. Averages exclude days that were never logged. Timing overlaps are associations, not causes.</p>' +
+      '<p class="rmeta" style="margin-top:22px">Self-reported daily ratings on a 1–5 scale (symptoms: 1 = none, 5 = severe). Averages exclude days that were never logged. Timing overlaps are associations, not causes.</p>' +
     '</div><div style="height:24px"></div>';
 }
 
@@ -2689,7 +2932,9 @@ function showParsed(rows, date, lab) {
       var existing = findMarkerByName(r.name);
       return '<tr><td><input type="checkbox" data-pi="' + i + '" data-pf="use"' + (r.use ? " checked" : "") + ' style="width:auto"></td>' +
         '<td><input type="text" data-pi="' + i + '" data-pf="name" value="' + esc(r.name) + '" style="min-width:150px">' +
-        (existing ? '<div class="tiny dim">matches your “' + esc(existing.name) + '”</div>' : '<div class="tiny" style="color:var(--flag)">new marker — will be created</div>') + '</td>' +
+        (existing ? '<div class="tiny dim">matches your “' + esc(existing.name) + '”</div>' +
+          (existing.unit && r.unit && unitKey(existing.unit) !== unitKey(r.unit)
+            ? '<div class="tiny" style="color:var(--crit)">Unit is ' + esc(r.unit) + ' here but your ' + esc(existing.name) + ' is in ' + esc(existing.unit) + ' — check before adding, the numbers aren’t comparable.</div>' : '') : '<div class="tiny" style="color:var(--flag)">new marker — will be created</div>') + '</td>' +
         '<td class="num"><input type="text" inputmode="decimal" data-pi="' + i + '" data-pf="value" value="' + esc(r.value) + '" style="width:84px;text-align:right"></td>' +
         '<td class="tiny">' + (r.lo ? esc(r.lo + "–" + r.hi) + '<br><label class="tiny" style="text-transform:none;letter-spacing:0;color:var(--ink-2);display:flex;gap:5px;align-items:center;margin-top:3px"><input type="checkbox" data-pi="' + i + '" data-pf="applyRange" checked style="width:auto"> use as standard range</label>' : '<span class="dim">—</span>') + '</td></tr>';
     }).join("") + '</tbody></table></div>' +
@@ -2807,6 +3052,9 @@ function cyclesBody() {
 function openCycles() { openModal("cycles", "Cycles", cyclesBody(), '<span style="flex:1"></span><button class="btn pri" data-a="closeModal">Done</button>'); }
 
 /* ---------- setup & data ---------- */
+function preRestoreKey() {
+  try { return Object.keys(localStorage).filter(function (k) { return k.indexOf("tfn-pre-restore-") === 0; })[0] || ""; } catch (e) { return ""; }
+}
 function setupBody() {
   var appts = STATE.appts.slice().sort(function (a, b) { return b.date < a.date ? -1 : 1; }).map(function (a) {
     return '<div class="supp-row"><div class="supp-nm">' + fmtMed(a.date) + '<small>' + esc(a.who || "") + (a.note ? " · " + esc(a.note) : "") + '</small></div>' +
@@ -2815,12 +3063,17 @@ function setupBody() {
   // count real entries: a day record can exist holding only an un-added draft
   var days = Object.keys(STATE.days).filter(function (dt) { return dayHasAnything(STATE.days[dt]); }).length;
   return '<div class="fgrid"><div class="fld" style="grid-column:1/-1"><label class="f">Your name (for the summary page)</label>' +
-    '<input type="text" id="pfName" value="' + esc(STATE.profile.name) + '" placeholder="Optional"></div></div>' +
+    '<input type="text" id="pfName" value="' + esc(STATE.profile.name) + '" placeholder="Optional"></div>' +
+    '<div class="fld"><label class="f">RD</label><input type="text" id="pfRd" value="' + esc(STATE.profile.rd) + '" placeholder="Name, practice"></div>' +
+    '<div class="fld"><label class="f">Endocrinologist</label><input type="text" id="pfEndo" value="' + esc(STATE.profile.endo) + '" placeholder="Name, practice"></div>' +
+    '<div class="fld"><label class="f">PCP</label><input type="text" id="pfPcp" value="' + esc(STATE.profile.pcp) + '" placeholder="Name, practice"></div></div>' +
+    '<div class="hint" style="margin-top:6px">Care team prints at the top of the summary. Saved when you press <b>Done</b>.</div>' +
     '<div class="sec"><span class="eyebrow">Appointments</span></div>' +
     (appts || '<div class="hint">Mark each RD, endo or PCP visit. The summary page then covers exactly the stretch since your last one.</div>') +
     '<div class="fgrid" style="margin-top:12px"><div class="fld"><label class="f">Date</label><input type="date" id="apDate" value="' + todayISO() + '"></div>' +
     '<div class="fld"><label class="f">Who</label><input type="text" id="apWho" placeholder="RD / Endo / PCP"></div>' +
     '<div class="fld" style="grid-column:1/-1"><label class="f">Note</label><input type="text" id="apNote" placeholder="Raised levo to 112"></div></div>' +
+    '<div class="hint" style="margin-top:6px">Upcoming visits are fine too — the summary page will say which visit it’s for.</div>' +
     '<div class="row" style="margin-top:10px"><button class="btn sm" data-a="apptSave">Add appointment</button></div>' +
     '<div class="sec"><span class="eyebrow">Your data</span></div>' +
     '<div class="hint" style="margin-bottom:12px"><b>In this app now:</b> ' + countsLine(stateCounts(STATE)) + '.<br><br>' +
@@ -2836,7 +3089,8 @@ function setupBody() {
     // fix: [hidden] is display:none!important, which iOS has never handled
     // dependably for a label-wrapped file input. Rendered but 1px and invisible.
     '<label class="btn" style="cursor:pointer">Import backup<input type="file" id="impFile" accept=".json,application/json" class="vh"></label></div>' +
-    '<div class="row" style="margin-top:8px"><button class="btn sm ghost" data-a="backupText">Backup as text (copy / paste)</button></div>' +
+    '<div class="row" style="margin-top:8px"><button class="btn sm ghost" data-a="backupText">Backup as text (copy / paste)</button>' +
+    (preRestoreKey() ? '<button class="btn sm ghost" data-a="undoRestore">Undo last restore</button>' : '') + '</div>' +
     '<div class="hint" style="margin-top:8px">' +
     (dlVerdict() === "blocked"
       ? 'Downloads don\u2019t arrive on this device, so <b>Export backup</b> hands you the text to copy instead. That is a real backup \u2014 paste it into a note or an email to yourself. The same box pastes one back in.'
@@ -3031,6 +3285,14 @@ function copyBackup() {
 
 function applyBackup(p, sourceLabel) {
   if (!p || !p.v) { toast("That isn't a Field Notes backup.", true); return false; }
+  /* Keep what was here before, in case the wrong (older) file was picked.
+     Only the newest copy is kept, so this can't fill the storage. */
+  try {
+    if (hasData()) {
+      Object.keys(localStorage).forEach(function (k) { if (k.indexOf("tfn-pre-restore-") === 0) localStorage.removeItem(k); });
+      localStorage.setItem("tfn-pre-restore-" + new Date().toISOString().slice(0, 10), JSON.stringify(STATE));
+    }
+  } catch (e) {}
   STATE = migrate(p);
   FIRST_RUN = false;
   STATE.seen = true;
@@ -3087,7 +3349,7 @@ function exportCsv() {
   var lines = [head.join(",")];
   dates.forEach(function (dt) {
     var d = STATE.days[dt];
-    var row = [dt, cycleDay(dt) || "", (d.bristol || []).join(" "), (d.bristol || []).length, (d.sleep && d.sleep.hours) || "", '"' + String(d.notes || "").replace(/"/g, '""') + '"'];
+    var row = [dt, cycleDay(dt) || "", (d.bristol || []).join(" "), (d.bristol || []).length ? d.bristol.length : (d.bmNone ? 0 : ""), (d.sleep && d.sleep.hours) || "", '"' + String(d.notes || "").replace(/"/g, '""') + '"'];
     syms.forEach(function (s) { row.push(d.s && d.s[s.id] != null ? d.s[s.id] : ""); });
     STATE.supps.forEach(function (s) { row.push(d.supps && d.supps[s.id] ? d.supps[s.id] : ""); });
     lines.push(row.join(","));
@@ -3197,8 +3459,12 @@ function act(a, t) {
     case "unrate": day = DW(CUR); delete day.s[id]; markDirty(); render(); return;
     case "noneAll":
       day = DW(CUR);
-      activeSymptoms().forEach(function (s) { if (s.scale === "sev") day.s[s.id] = 1; });
-      day.bmNone = true; day.noneAll = true;
+      // Fill only what she hasn't rated yet — never overwrite a rating already entered.
+      var keptN = 0;
+      activeSymptoms().forEach(function (s) { if (s.scale !== "sev") return; if (day.s[s.id] == null) day.s[s.id] = 1; else if (day.s[s.id] > 1) keptN++; });
+      if (!(day.bristol || []).length) day.bmNone = true;
+      day.noneAll = true;
+      if (keptN) { markDirty(); render(); toast("Marked the rest as None — kept the " + keptN + " symptom" + (keptN === 1 ? "" : "s") + " you already rated."); return; }
       markDirty(); render(); toast("Marked every severity-rated symptom as None. Set energy, sleep quality and appetite when you get a chance."); return;
     case "bristol": day = DW(CUR); day.bristol.push(+v); day.bmNone = false; markDirty(); render(); return;
     case "bristolClear": day = DW(CUR); day.bristol = []; day.bmNone = false; markDirty(); render(); return;
@@ -3405,23 +3671,23 @@ function act(a, t) {
     }
     case "labAdd": openLabAdd(); return;
     case "labSave": {
-      var val = num(mv("laVal")); if (val == null) { toast("Enter a number."); return; }
-      STATE.labs.push({ id: uid(), markerId: el("laMk").value, date: mv("laDate") || todayISO(), value: val, lab: mv("laLab"), note: mv("laNote") });
+      var val = labNum(mv("laVal")); if (val == null) { toast("Enter a number."); return; }
+      STATE.labs.push({ id: uid(), markerId: el("laMk").value, date: mv("laDate") || todayISO(), value: val, qual: labQual(mv("laVal")), lab: mv("laLab"), note: mv("laNote") });
       UI.labMarker = el("laMk").value;
       markDirty(); closeModal(); render(); return;
     }
     case "labEdit": openLabEdit(id); return;
     case "labEditSave": {
       var lr = byIdIn(STATE.labs, id); if (!lr) { closeModal(); return; }
-      var lv = num(mv("leVal")); if (lv == null) { toast("Enter a number for the value."); return; }
-      lr.markerId = el("leMk").value; lr.date = mv("leDate") || lr.date; lr.value = lv;
+      var lv = labNum(mv("leVal")); if (lv == null) { toast("Enter a number for the value."); return; }
+      lr.markerId = el("leMk").value; lr.date = mv("leDate") || lr.date; lr.value = lv; lr.qual = labQual(mv("leVal"));
       lr.lab = mv("leLab"); lr.note = mv("leNote");
       UI.labMarker = lr.markerId;
       markDirty(); closeModal(); render(); toast("Result updated."); return;
     }
     case "labDel": {
       var lrd = byIdIn(STATE.labs, id);
-      openConfirm("Delete this result?", lrd ? (lrd.value + " on " + fmtMed(lrd.date) + ". This can’t be undone.") : "", "Delete", function () {
+      openConfirm("Delete this result?", lrd ? (labVal(lrd) + " on " + fmtMed(lrd.date) + ". This can’t be undone.") : "", "Delete", function () {
         STATE.labs = STATE.labs.filter(function (x) { return x.id !== id; }); markDirty(); render();
       });
       return;
@@ -3441,6 +3707,25 @@ function act(a, t) {
         STATE.labNotes = STATE.labNotes.filter(function (x) { return x.id !== id; }); markDirty(); render();
       });
       return;
+    case "refNew": openRefNote(null); return;
+    case "refEdit": openRefNote(id); return;
+    case "refSave": {
+      var rt = mv("rnText"), rti = mv("rnTitle");
+      if (!rt && !rti) { toast("Type the note, or Cancel."); return; }
+      var rmk = [], rbs = el("modalBody").querySelectorAll("[data-rn-mk]:checked");
+      for (var ri = 0; ri < rbs.length; ri++) rmk.push(rbs[ri].getAttribute("data-rn-mk"));
+      var rpr = el("rnPrint") ? el("rnPrint").checked : true;
+      var rn = id ? byIdIn(STATE.refNotes, id) : null;
+      if (rn) { rn.title = rti; rn.text = rt; rn.markers = rmk; rn.print = rpr; rn.updated = todayISO(); }
+      else STATE.refNotes.push(normRefNote({ title: rti, text: rt, markers: rmk, print: rpr }));
+      markDirty(); closeModal(); render(); toast("Lab note saved."); return;
+    }
+    case "refDel":
+      openConfirm("Delete this lab note?", "This can’t be undone.", "Delete", function () {
+        STATE.refNotes = STATE.refNotes.filter(function (x) { return x.id !== id; }); markDirty(); render();
+      });
+      return;
+    case "qWhoSet": UI.qWho = v || ""; render(); return;
     case "markerBulk": openMarkerBulk(); return;
     case "mbParse": {
       var rowsB = parseMarkerList(el("mbText").value);
@@ -3493,12 +3778,13 @@ function act(a, t) {
       }
       PARSED.forEach(function (r) {
         if (!r.use) return;
-        var vv = num(r.value); if (vv == null) return;
+        var vv = labNum(r.value); if (vv == null) return;
+        var vq = labQual(r.value);
         var mk2 = ensureMarker(r.name, r.unit);
         if (r.applyRange && r.lo && !mk2.sl && !mk2.sh) { mk2.sl = r.lo; mk2.sh = r.hi; }
         var dd = r.date || (el("pDate") && el("pDate").value) || v;
         var dupe = STATE.labs.filter(function (x) { return x.markerId === mk2.id && x.date === dd; })[0];
-        if (dupe) { dupe.value = vv; } else { STATE.labs.push({ id: uid(), markerId: mk2.id, date: dd, value: vv, lab: id || "", note: "" }); }
+        if (dupe) { dupe.value = vv; dupe.qual = vq; } else { STATE.labs.push({ id: uid(), markerId: mk2.id, date: dd, value: vv, qual: vq, lab: id || "", note: "" }); }
         n++;
       });
       var pnote = el("pNote") ? el("pNote").value : "";
@@ -3547,6 +3833,7 @@ function act(a, t) {
     case "apptAdd": openSetup(); return;
     case "apptSave": {
       var ad = mv("apDate"); if (!ad) { toast("Pick a date."); return; }
+      if (el("pfRd")) { STATE.profile.name = mv("pfName"); STATE.profile.rd = mv("pfRd"); STATE.profile.endo = mv("pfEndo"); STATE.profile.pcp = mv("pfPcp"); }
       STATE.appts.push({ id: uid(), date: ad, who: mv("apWho"), note: mv("apNote") });
       markDirty(); openSetup(); render(); return;
     }
@@ -3583,7 +3870,20 @@ function act(a, t) {
       if (v) document.documentElement.setAttribute("data-theme", v); else document.documentElement.removeAttribute("data-theme");
       try { localStorage.setItem("tfn-theme", v || ""); } catch (e) {}
       return;
-    case "setupSave": STATE.profile.name = mv("pfName"); markDirty(); closeModal(); render(); return;
+    case "setupSave":
+      STATE.profile.name = mv("pfName");
+      if (el("pfRd")) { STATE.profile.rd = mv("pfRd"); STATE.profile.endo = mv("pfEndo"); STATE.profile.pcp = mv("pfPcp"); }
+      markDirty(); closeModal(); render(); return;
+    case "undoRestore": {
+      var urk = Object.keys(localStorage).filter(function (k) { return k.indexOf("tfn-pre-restore-") === 0; })[0];
+      if (!urk) { toast("Nothing to undo."); return; }
+      var urp = null; try { urp = JSON.parse(localStorage.getItem(urk)); } catch (e) {}
+      if (!urp || !urp.v) { toast("That saved copy couldn’t be read.", true); return; }
+      if (!confirm("Go back to what was in the app before the last restore (" + urk.slice(16) + ")?\n\nIt holds:\n" + countsLine(stateCounts(urp)))) return;
+      STATE = migrate(urp); saveNow();
+      try { localStorage.removeItem(urk); } catch (e) {}
+      closeModal(); render(); toast("Back to how it was before the restore.", true); return;
+    }
   }
 }
 
@@ -3662,9 +3962,22 @@ function wire() {
      debounced save lands before the page is backgrounded or closed. */
   window.addEventListener("pagehide", flushSave);
   window.addEventListener("beforeunload", flushSave);
+  /* A home-screen app resumes without reloading. If it was left on "today"
+     and the date has turned over, move to the new today so nothing gets
+     logged under yesterday by accident. */
+  var shownToday = todayISO();
+  function rollDay() {
+    var t = todayISO();
+    if (t === shownToday) return;
+    if (CUR === shownToday && !MODAL) { CUR = t; render(); }
+    shownToday = t;
+  }
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "hidden") flushSave();
+    else rollDay();
   });
+  window.addEventListener("pageshow", rollDay);
+  window.addEventListener("focus", rollDay);
 }
 
 /* ============================================================
